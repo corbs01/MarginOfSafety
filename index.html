@@ -652,45 +652,91 @@
       const inputRef = useRef();
 
       async function analyse(ticker) {
-        if (!ticker.trim()) return;
+        const t = ticker.trim().toUpperCase();
+        if (!t) return;
         setLoading(true);
         setReport(null);
         setError(null);
 
         try {
-          // Step 1 – Business overview + latest financials via search
-          setLoadingStep("Researching the business & latest filings…");
-          const overviewRaw = await callClaude(
-            [{ role: "user", content: `Analyse ${ticker.trim().toUpperCase()} for a value investor. Return ONLY valid JSON (no markdown fences) with these exact keys:
-{
-  "companyName": "Full company name",
-  "ticker": "TICKER",
-  "currentPrice": "e.g. $185.20 (or 'N/A')",
-  "overview": "3–4 sentences explaining what the business does in plain English, how it makes money, and its key revenue drivers",
-  "keyDrivers": ["driver 1", "driver 2", "driver 3"],
-  "metrics": {
-    "peRatio": "value or N/A",
-    "pbRatio": "value or N/A",
-    "roe": "value% or N/A",
-    "roic": "value% or N/A",
-    "debtToEquity": "value or N/A",
-    "fcfYield": "value% or N/A",
-    "revenueGrowth5yr": "value% or N/A",
-    "grossMargin": "value% or N/A"
-  },
-  "latestFinancials": "2–3 sentences summarising the most recent 10-Q or 10-K highlights"
-}` }],
-            "You are a financial data analyst. Return only valid JSON, no commentary, no markdown.",
-            true
-          );
+          // Step 1 – Fetch real financial data from FMP
+          setLoadingStep("Fetching real financial data…");
+          const [profileArr, metricsArr, incomeArr] = await Promise.all([
+            fetchFMP(`/profile/${t}`),
+            fetchFMP(`/key-metrics-ttm/${t}`),
+            fetchFMP(`/income-statement/${t}?limit=5`),
+          ]);
 
-          const overview = parseJSON(overviewRaw);
-          if (!overview) throw new Error("Could not parse company data. Try a major ticker like AAPL or KO.");
+          const profile = profileArr[0];
+          if (!profile || !profile.companyName) throw new Error(`Ticker "${t}" not found. Try a valid US ticker like AAPL or KO.`);
 
-          // Step 2 – Moat analysis
+          const m = metricsArr[0] || {};
+          const latestIncome = incomeArr[0] || {};
+          const oldestIncome = incomeArr[incomeArr.length - 1] || {};
+
+          // Calculate 5yr revenue CAGR
+          let revenueGrowth5yr = "N/A";
+          if (incomeArr.length >= 2 && oldestIncome.revenue && latestIncome.revenue && oldestIncome.revenue !== 0) {
+            const years = incomeArr.length - 1;
+            const cagr = (Math.pow(latestIncome.revenue / oldestIncome.revenue, 1 / years) - 1) * 100;
+            revenueGrowth5yr = cagr.toFixed(1) + "%";
+          }
+
+          // Format latest financials summary from real data
+          const revYoY = incomeArr.length >= 2 && incomeArr[1].revenue
+            ? ((latestIncome.revenue - incomeArr[1].revenue) / incomeArr[1].revenue * 100).toFixed(1) + "% YoY"
+            : "";
+          const latestFinancials = [
+            `Revenue: ${formatNum(latestIncome.revenue)}${revYoY ? " (" + revYoY + ")" : ""}`,
+            `Net Income: ${formatNum(latestIncome.netIncome)}`,
+            `Operating Income: ${formatNum(latestIncome.operatingIncome)}`,
+          ].filter(Boolean).join(" · ");
+
+          const overview = {
+            companyName: profile.companyName,
+            ticker: profile.symbol,
+            currentPrice: profile.price != null ? "$" + Number(profile.price).toFixed(2) : "N/A",
+            overview: profile.description || "No description available.",
+            keyDrivers: [],  // filled by Claude moat call
+            metrics: {
+              peRatio: fmtRatio(m.peRatioTTM),
+              pbRatio: fmtRatio(m.pbRatioTTM),
+              roe: fmtPct(m.returnOnEquityTTM),
+              roic: fmtPct(m.roicTTM),
+              debtToEquity: fmtRatio(m.debtToEquityTTM),
+              fcfYield: fmtPct(m.freeCashFlowYieldTTM),
+              revenueGrowth5yr,
+              grossMargin: fmtPct(m.grossProfitMarginTTM),
+            },
+            latestFinancials,
+            sector: profile.sector || "",
+            industry: profile.industry || "",
+          };
+
+          // Step 2 – Real news from FMP
+          setLoadingStep("Fetching latest news…");
+          const newsArr = await fetchFMP(`/stock_news?tickers=${t}&limit=5`);
+          const news = {
+            news: (newsArr || []).slice(0, 5).map(item => {
+              const { sentiment, type } = classifyNews(item.title || "", item.text || "");
+              return {
+                headline: item.title || "",
+                date: fmtNewsDate(item.publishedDate),
+                sentiment,
+                summary: item.text ? item.text.slice(0, 220) + "…" : "",
+                type,
+              };
+            }),
+          };
+
+          // Step 3 – Moat analysis (Claude, grounded in real data)
           setLoadingStep("Evaluating the economic moat…");
           const moatRaw = await callClaude(
-            [{ role: "user", content: `Evaluate the economic moat of ${overview.companyName} (${overview.ticker}). Return ONLY valid JSON:
+            [{ role: "user", content: `Evaluate the economic moat of ${overview.companyName} (${overview.ticker}).
+Sector: ${overview.sector} | Industry: ${overview.industry}
+Real metrics — ROE: ${overview.metrics.roe}, ROIC: ${overview.metrics.roic}, Gross Margin: ${overview.metrics.grossMargin}, D/E: ${overview.metrics.debtToEquity}
+
+Return ONLY valid JSON:
 {
   "moatRating": "Wide / Narrow / None",
   "moatScores": {
@@ -701,17 +747,21 @@
     "intangibles": 0-10
   },
   "moatSummary": "3–4 sentences on the competitive advantages and any threats to the moat",
-  "managementSummary": "3–4 sentences on management quality, capital allocation track record, and alignment with shareholders"
+  "managementSummary": "3–4 sentences on management quality, capital allocation track record, and alignment with shareholders",
+  "keyDrivers": ["driver 1", "driver 2", "driver 3"]
 }` }],
-            "You are a value investing analyst specialising in competitive moat analysis. Return only valid JSON.",
-            true
+            "You are a value investing analyst specialising in competitive moat analysis. Return only valid JSON."
           );
           const moat = parseJSON(moatRaw);
+          if (moat?.keyDrivers) overview.keyDrivers = moat.keyDrivers;
 
-          // Step 3 – Intrinsic value
+          // Step 4 – Intrinsic value (Claude, anchored to real metrics)
           setLoadingStep("Calculating intrinsic value…");
           const ivRaw = await callClaude(
-            [{ role: "user", content: `Estimate the intrinsic value of ${overview.companyName} (${overview.ticker}) using value investing principles. Return ONLY valid JSON:
+            [{ role: "user", content: `Estimate the intrinsic value of ${overview.companyName} (${overview.ticker}) using value investing principles.
+Real data — Current Price: ${overview.currentPrice}, P/E: ${overview.metrics.peRatio}, P/B: ${overview.metrics.pbRatio}, FCF Yield: ${overview.metrics.fcfYield}, ROIC: ${overview.metrics.roic}, ROE: ${overview.metrics.roe}, 5yr Revenue Growth: ${overview.metrics.revenueGrowth5yr}
+
+Return ONLY valid JSON:
 {
   "intrinsicValueLow": "$XXX",
   "intrinsicValueMid": "$XXX",
@@ -722,19 +772,19 @@
   "keyAssumptions": ["assumption 1", "assumption 2", "assumption 3"],
   "ivSummary": "3 sentences explaining the valuation and what drives it"
 }` }],
-            "You are a value investing analyst. Be conservative and margin-of-safety focused. Return only valid JSON.",
-            true
+            "You are a value investing analyst. Be conservative and margin-of-safety focused. Return only valid JSON."
           );
           const iv = parseJSON(ivRaw);
 
-          // Step 4 – Buffett/Munger verdict
+          // Step 5 – Buffett/Munger verdict
           setLoadingStep("Channelling Buffett & Munger…");
           const verdictRaw = await callClaude(
             [{ role: "user", content: `You are Warren Buffett and Charlie Munger analysing ${overview.companyName} (${overview.ticker}).
-Business: ${overview.overview}
+Business: ${overview.overview.slice(0, 400)}
 Moat: ${moat?.moatSummary}
 Valuation: ${iv?.ivSummary}
 Management: ${moat?.managementSummary}
+Key Metrics: P/E ${overview.metrics.peRatio}, ROE ${overview.metrics.roe}, ROIC ${overview.metrics.roic}, FCF Yield ${overview.metrics.fcfYield}
 
 Return ONLY valid JSON:
 {
@@ -744,30 +794,9 @@ Return ONLY valid JSON:
   "keyRisks": ["risk 1", "risk 2", "risk 3"],
   "catalysts": ["catalyst 1", "catalyst 2"]
 }` }],
-            "You are Warren Buffett and Charlie Munger. Speak authentically in their voices. Return only valid JSON.",
-            false
+            "You are Warren Buffett and Charlie Munger. Speak authentically in their voices. Return only valid JSON."
           );
           const verdict = parseJSON(verdictRaw);
-
-          // Step 5 – News feed
-          setLoadingStep("Scanning for latest news & filings…");
-          const newsRaw = await callClaude(
-            [{ role: "user", content: `Find the 4 most recent and important news items, filings, or events for ${overview.companyName} (${overview.ticker}) that a value investor should know about. Return ONLY valid JSON:
-{
-  "news": [
-    {
-      "headline": "...",
-      "date": "approx date",
-      "sentiment": "bullish/bearish/neutral",
-      "summary": "1–2 sentences on what happened and why it matters to a value investor",
-      "type": "Earnings / Filing / M&A / Product / Macro / Other"
-    }
-  ]
-}` }],
-            "You are a financial news analyst. Return only valid JSON.",
-            true
-          );
-          const news = parseJSON(newsRaw);
 
           setReport({ overview, moat, iv, verdict, news });
         } catch (e) {
