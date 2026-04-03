@@ -227,6 +227,7 @@
         transition: all 0.15s;
       }
       .chip:hover { background: ${INK}; color: ${PARCHMENT}; border-color: ${INK}; }
+      .chip:disabled { opacity: 0.4; cursor: not-allowed; }
 
       /* ── Loading ── */
       .loading-block {
@@ -554,6 +555,36 @@
       );
     }
 
+    function NewsItem({ item }) {
+      const [expanded, setExpanded] = useState(false);
+      const hasMore = item.fullSummary && item.fullSummary.length > 220;
+      return (
+        <div className="news-item">
+          <div className={`news-dot ${item.sentiment}`} />
+          <div>
+            <div className="news-headline">{item.headline}</div>
+            <div className="news-meta">
+              {item.date} · {item.type} ·{" "}
+              <span style={{ color: item.sentiment === "bullish" ? "#4a7c59" : item.sentiment === "bearish" ? RUST : FADED }}>
+                {item.sentiment}
+              </span>
+            </div>
+            <div className="news-summary">{expanded ? item.fullSummary : item.summary}</div>
+            {hasMore && (
+              <button
+                onClick={() => setExpanded(e => !e)}
+                style={{ marginTop: 4, background: "none", border: "none",
+                         fontFamily: "'Courier Prime', monospace", fontSize: 12,
+                         color: GOLD, cursor: "pointer", padding: 0, letterSpacing: 1 }}
+              >
+                {expanded ? "▴ Collapse" : "▾ Read more"}
+              </button>
+            )}
+          </div>
+        </div>
+      );
+    }
+
     function parseJSON(text) {
       try {
         const clean = text.replace(/```json\n?|```\n?/g, "").trim();
@@ -567,7 +598,7 @@
       const apiKey = window.getApiKey();
       if (!apiKey) throw new Error("Please enter your Anthropic API key in the banner above.");
 
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
+      const res = await fetchWithTimeout("https://api.anthropic.com/v1/messages", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -581,7 +612,12 @@
           system: systemPrompt,
           messages,
         }),
-      });
+      }, 45000);
+      if (!res.ok) {
+        let msg = `Claude API error (HTTP ${res.status})`;
+        try { const d = await res.json(); if (d.error?.message) msg = d.error.message; } catch {}
+        throw new Error(msg);
+      }
       const data = await res.json();
       if (data.error) throw new Error(data.error.message);
       return data.content.map(b => b.text || "").filter(Boolean).join("\n");
@@ -589,11 +625,18 @@
 
     const FMP_BASE = "https://financialmodelingprep.com/api/v3";
 
+    function fetchWithTimeout(url, options, ms = 30000) {
+      const ctrl = new AbortController();
+      const id = setTimeout(() => ctrl.abort(), ms);
+      return fetch(url, { ...options, signal: ctrl.signal }).finally(() => clearTimeout(id));
+    }
+
     async function fetchFMP(path) {
       const key = window.getFMPKey();
       if (!key) throw new Error("Please enter your FMP API key in the banner above.");
       const sep = path.includes("?") ? "&" : "?";
-      const res = await fetch(`${FMP_BASE}${path}${sep}apikey=${key}`);
+      const res = await fetchWithTimeout(`${FMP_BASE}${path}${sep}apikey=${key}`, {}, 15000);
+      if (!res.ok) throw new Error(`FMP returned HTTP ${res.status} — check your FMP key or try again later.`);
       const data = await res.json();
       if (data["Error Message"]) throw new Error(`FMP: ${data["Error Message"]}`);
       return data;
@@ -660,7 +703,7 @@
 
         try {
           // Step 1 – Fetch real financial data from FMP
-          setLoadingStep("Fetching real financial data…");
+          setLoadingStep("Step 1 of 5 — Fetching real financial data…");
           const [profileArr, metricsArr, incomeArr] = await Promise.all([
             fetchFMP(`/profile/${t}`),
             fetchFMP(`/key-metrics-ttm/${t}`),
@@ -670,9 +713,9 @@
           const profile = profileArr[0];
           if (!profile || !profile.companyName) throw new Error(`Ticker "${t}" not found. Try a valid US ticker like AAPL or KO.`);
 
-          const m = metricsArr[0] || {};
-          const latestIncome = incomeArr[0] || {};
-          const oldestIncome = incomeArr[incomeArr.length - 1] || {};
+          const m = (metricsArr && metricsArr[0]) || {};
+          const latestIncome = (incomeArr && incomeArr[0]) || {};
+          const oldestIncome = (incomeArr && incomeArr.length > 0) ? incomeArr[incomeArr.length - 1] : {};
 
           // Calculate 5yr revenue CAGR
           let revenueGrowth5yr = "N/A";
@@ -683,7 +726,7 @@
           }
 
           // Format latest financials summary from real data
-          const revYoY = incomeArr.length >= 2 && incomeArr[1].revenue
+          const revYoY = incomeArr && incomeArr.length >= 2 && incomeArr[1].revenue
             ? ((latestIncome.revenue - incomeArr[1].revenue) / incomeArr[1].revenue * 100).toFixed(1) + "% YoY"
             : "";
           const latestFinancials = [
@@ -714,7 +757,7 @@
           };
 
           // Step 2 – Real news from FMP
-          setLoadingStep("Fetching latest news…");
+          setLoadingStep("Step 2 of 5 — Fetching latest news…");
           const newsArr = await fetchFMP(`/stock_news?tickers=${t}&limit=5`);
           const news = {
             news: (newsArr || []).slice(0, 5).map(item => {
@@ -723,16 +766,18 @@
                 headline: item.title || "",
                 date: fmtNewsDate(item.publishedDate),
                 sentiment,
-                summary: item.text ? item.text.slice(0, 220) + "…" : "",
+                summary: item.text ? item.text.slice(0, 220) + (item.text.length > 220 ? "…" : "") : "",
+                fullSummary: item.text || "",
                 type,
               };
             }),
           };
 
-          // Step 3 – Moat analysis (Claude, grounded in real data)
-          setLoadingStep("Evaluating the economic moat…");
-          const moatRaw = await callClaude(
-            [{ role: "user", content: `Evaluate the economic moat of ${overview.companyName} (${overview.ticker}).
+          // Steps 3 & 4 – Moat + IV in parallel (Claude, grounded in real data)
+          setLoadingStep("Step 3 of 5 — Evaluating moat & intrinsic value…");
+          const [moatRaw, ivRaw] = await Promise.all([
+            callClaude(
+              [{ role: "user", content: `Evaluate the economic moat of ${overview.companyName} (${overview.ticker}).
 Sector: ${overview.sector} | Industry: ${overview.industry}
 Real metrics — ROE: ${overview.metrics.roe}, ROIC: ${overview.metrics.roic}, Gross Margin: ${overview.metrics.grossMargin}, D/E: ${overview.metrics.debtToEquity}
 
@@ -750,15 +795,10 @@ Return ONLY valid JSON:
   "managementSummary": "3–4 sentences on management quality, capital allocation track record, and alignment with shareholders",
   "keyDrivers": ["driver 1", "driver 2", "driver 3"]
 }` }],
-            "You are a value investing analyst specialising in competitive moat analysis. Return only valid JSON."
-          );
-          const moat = parseJSON(moatRaw);
-          if (moat?.keyDrivers) overview.keyDrivers = moat.keyDrivers;
-
-          // Step 4 – Intrinsic value (Claude, anchored to real metrics)
-          setLoadingStep("Calculating intrinsic value…");
-          const ivRaw = await callClaude(
-            [{ role: "user", content: `Estimate the intrinsic value of ${overview.companyName} (${overview.ticker}) using value investing principles.
+              "You are a value investing analyst specialising in competitive moat analysis. Return only valid JSON."
+            ),
+            callClaude(
+              [{ role: "user", content: `Estimate the intrinsic value of ${overview.companyName} (${overview.ticker}) using value investing principles.
 Real data — Current Price: ${overview.currentPrice}, P/E: ${overview.metrics.peRatio}, P/B: ${overview.metrics.pbRatio}, FCF Yield: ${overview.metrics.fcfYield}, ROIC: ${overview.metrics.roic}, ROE: ${overview.metrics.roe}, 5yr Revenue Growth: ${overview.metrics.revenueGrowth5yr}
 
 Return ONLY valid JSON:
@@ -772,18 +812,25 @@ Return ONLY valid JSON:
   "keyAssumptions": ["assumption 1", "assumption 2", "assumption 3"],
   "ivSummary": "3 sentences explaining the valuation and what drives it"
 }` }],
-            "You are a value investing analyst. Be conservative and margin-of-safety focused. Return only valid JSON."
-          );
-          const iv = parseJSON(ivRaw);
+              "You are a value investing analyst. Be conservative and margin-of-safety focused. Return only valid JSON."
+            ),
+          ]);
 
-          // Step 5 – Buffett/Munger verdict
-          setLoadingStep("Channelling Buffett & Munger…");
+          const moat = parseJSON(moatRaw);
+          if (!moat) throw new Error("Could not parse moat analysis from Claude. Please try again.");
+          if (moat.keyDrivers) overview.keyDrivers = moat.keyDrivers;
+
+          const iv = parseJSON(ivRaw);
+          if (!iv) throw new Error("Could not parse intrinsic value estimate from Claude. Please try again.");
+
+          // Step 5 – Buffett/Munger verdict (sequential — depends on moat + iv)
+          setLoadingStep("Step 4 of 5 — Channelling Buffett & Munger…");
           const verdictRaw = await callClaude(
             [{ role: "user", content: `You are Warren Buffett and Charlie Munger analysing ${overview.companyName} (${overview.ticker}).
 Business: ${overview.overview.slice(0, 400)}
-Moat: ${moat?.moatSummary}
-Valuation: ${iv?.ivSummary}
-Management: ${moat?.managementSummary}
+Moat: ${moat.moatSummary}
+Valuation: ${iv.ivSummary}
+Management: ${moat.managementSummary}
 Key Metrics: P/E ${overview.metrics.peRatio}, ROE ${overview.metrics.roe}, ROIC ${overview.metrics.roic}, FCF Yield ${overview.metrics.fcfYield}
 
 Return ONLY valid JSON:
@@ -797,10 +844,15 @@ Return ONLY valid JSON:
             "You are Warren Buffett and Charlie Munger. Speak authentically in their voices. Return only valid JSON."
           );
           const verdict = parseJSON(verdictRaw);
+          if (!verdict) throw new Error("Could not parse Buffett & Munger verdict from Claude. Please try again.");
 
+          setLoadingStep("Step 5 of 5 — Compiling your report…");
           setReport({ overview, moat, iv, verdict, news });
         } catch (e) {
-          setError(e.message || "Something went wrong. Please try again.");
+          const msg = e.name === "AbortError"
+            ? "Request timed out. Please check your connection and try again."
+            : (e.message || "Something went wrong. Please try again.");
+          setError(msg);
         } finally {
           setLoading(false);
           setLoadingStep("");
@@ -852,7 +904,7 @@ Return ONLY valid JSON:
               </div>
               <div className="recent-row">
                 {SAMPLE_TICKERS.map(t => (
-                  <button key={t} className="chip" onClick={() => { setQuery(t); analyse(t); }}>{t}</button>
+                  <button key={t} className="chip" disabled={loading} onClick={() => { setQuery(t); analyse(t); }}>{t}</button>
                 ))}
               </div>
             </div>
@@ -867,7 +919,21 @@ Return ONLY valid JSON:
             )}
 
             {/* Error */}
-            {error && <div className="error-box">⚠ {error}</div>}
+            {error && (
+              <div className="error-box">
+                <strong>⚠ Analysis Failed</strong>
+                <div style={{ marginTop: 8, fontSize: 15 }}>{error}</div>
+                <button
+                  style={{ marginTop: 14, fontFamily: "'Courier Prime', monospace", fontSize: 13,
+                           padding: "6px 16px", cursor: "pointer", background: "transparent",
+                           border: `1px solid ${RUST}`, color: RUST }}
+                  onClick={() => analyse(query)}
+                  disabled={loading}
+                >
+                  Retry
+                </button>
+              </div>
+            )}
 
             {/* Report */}
             {report && !loading && (() => {
@@ -879,6 +945,12 @@ Return ONLY valid JSON:
                     <div>
                       <div className="report-company">{overview?.companyName || query.toUpperCase()}</div>
                       <div className="report-ticker">{overview?.ticker} · {overview?.currentPrice}</div>
+                      {(overview?.sector || overview?.industry) && (
+                        <div style={{ fontFamily: "'Courier Prime', monospace", fontSize: 12, letterSpacing: 2,
+                                      color: GOLD, opacity: 0.75, marginTop: 4, textTransform: "uppercase" }}>
+                          {[overview.sector, overview.industry].filter(Boolean).join(" · ")}
+                        </div>
+                      )}
                     </div>
                     {verdict?.verdict && (
                       <div className={`verdict-badge ${verdictClass}`}>{verdict.verdict}</div>
@@ -1037,14 +1109,7 @@ Return ONLY valid JSON:
                     {news?.news?.length > 0 && (
                       <CollapsibleSection title="Latest News & Filings" icon="📰">
                         {news.news.map((item, i) => (
-                          <div className="news-item" key={i}>
-                            <div className={`news-dot ${item.sentiment}`} />
-                            <div>
-                              <div className="news-headline">{item.headline}</div>
-                              <div className="news-meta">{item.date} · {item.type} · <span style={{ color: item.sentiment === "bullish" ? "#4a7c59" : item.sentiment === "bearish" ? RUST : FADED }}>{item.sentiment}</span></div>
-                              <div className="news-summary">{item.summary}</div>
-                            </div>
-                          </div>
+                          <NewsItem key={i} item={item} />
                         ))}
                       </CollapsibleSection>
                     )}
