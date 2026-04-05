@@ -98,6 +98,89 @@ function NewsItem({ item }) {
   );
 }
 
+// ── 5-Year Financial History Table ───────────────────────────────────────────
+
+function HistoryTable({ history }) {
+  if (!history || !history.rows || !history.rows.length) {
+    return <div className="prose">Financial history unavailable.</div>;
+  }
+
+  const { years, rows } = history;
+
+  const trendIcon  = d => d === "up" ? "▲" : d === "down" ? "▼" : "—";
+  const trendColor = d => d === "up" ? "#4a7c59" : d === "down" ? RUST : FADED;
+
+  // Group rows by section so we can render subtle dividers
+  let lastSection = null;
+
+  return (
+    <div>
+      <div style={{ overflowX: "auto" }}>
+        <table className="history-table">
+          <thead>
+            <tr>
+              <th className="history-th history-th-label">Metric</th>
+              {years.map((yr, i) => (
+                <th key={i} className={`history-th history-th-year ${i === 0 ? "history-th-latest" : ""}`}>
+                  {yr}
+                </th>
+              ))}
+              <th className="history-th history-th-trend">Trend</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, ri) => {
+              const isNewSection = row.section && row.section !== lastSection;
+              lastSection = row.section;
+              return (
+                <React.Fragment key={ri}>
+                  {isNewSection && (
+                    <tr className="history-section-row">
+                      <td colSpan={years.length + 2} className="history-section-label">
+                        {row.section}
+                      </td>
+                    </tr>
+                  )}
+                  <tr className={`history-row ${ri % 2 === 0 ? "history-row-even" : "history-row-odd"}`}>
+                    <td className="history-td history-td-label">{row.label}</td>
+                    {row.values.map((val, vi) => (
+                      <td
+                        key={vi}
+                        className={`history-td history-td-value${vi === 0 ? " history-td-latest" : ""}`}
+                      >
+                        {val}
+                      </td>
+                    ))}
+                    <td
+                      className="history-td history-td-trend"
+                      style={{ color: trendColor(row.trend) }}
+                    >
+                      <span>{trendIcon(row.trend)}</span>
+                      {row.trendPct && (
+                        <span style={{ marginLeft: 4, fontSize: 11 }}>{row.trendPct}</span>
+                      )}
+                    </td>
+                  </tr>
+                </React.Fragment>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div style={{
+        marginTop: 10,
+        fontFamily: "'Courier Prime', monospace",
+        fontSize: 11,
+        color: FADED,
+        letterSpacing: 0.5,
+        fontStyle: "italic",
+      }}>
+        ▲ / ▼ shows change from oldest to most recent year · Most recent year highlighted in gold
+      </div>
+    </div>
+  );
+}
+
 // ── IV Parameter Editor ───────────────────────────────────────────────────────
 
 function ParamField({ label, hint, value, onChange, min, max, step, unit, disabled }) {
@@ -451,9 +534,12 @@ function App() {
     setReport(null);
     setError(null);
 
+    // Reset fetch metadata so we get a clean cache summary for this run
+    window.__fetchMeta = [];
+
     try {
       // ── Step 1: Fetch all free FMP endpoints in parallel ─────────────────
-      setLoadingStep("Step 1 of 3 — Fetching financials from FMP…");
+      setLoadingStep("Step 1 of 3 — Loading financials…");
       const [profileArr, incomeArr, balanceArr, cashflowArr, newsArr] = await Promise.all([
         fetchFMP(`/profile?symbol=${t}`),
         fetchFMP(`/income-statement?symbol=${t}&limit=5`),
@@ -461,6 +547,19 @@ function App() {
         fetchFMP(`/cashflow-statement?symbol=${t}&limit=5`),
         fetchFMP(`/stock-news?symbol=${t}&limit=5`),
       ]);
+
+      // Build cache summary for display in the report header
+      const meta      = window.__fetchMeta || [];
+      const hits      = meta.filter(m => m.status === "HIT");
+      const misses    = meta.filter(m => m.status === "MISS");
+      const isDirect  = meta.every(m => m.status === "DIRECT");
+      const cacheInfo = isDirect
+        ? { label: "Live — FMP API", icon: "🌐", hint: "Run via server for caching" }
+        : hits.length === meta.length
+        ? { label: `All ${hits.length} datasets from cache`, icon: "📂", hint: `Oldest: ${hits.map(h=>h.age).filter(Boolean).sort().pop() || "fresh"}` }
+        : hits.length > 0
+        ? { label: `${hits.length} cached · ${misses.length} fresh from FMP`, icon: "📂", hint: "Partial cache hit" }
+        : { label: "Fetched fresh from FMP — saved to cache", icon: "↓", hint: "Will load instantly next time" };
 
       const profile = profileArr && profileArr[0];
       if (!profile || !profile.companyName)
@@ -510,8 +609,9 @@ function App() {
         industry: profile.industry || "",
       };
 
-      // ── Step 3: Verdict ──────────────────────────────────────────────────
+      // ── Step 3: Build 5-year history + verdict ───────────────────────────
       setLoadingStep("Step 3 of 3 — Rendering the verdict…");
+      const history = buildHistory(incomeArr, balanceArr, cashflowArr);
       const verdict = buildVerdict(profile, m, moat, iv);
 
       const news = {
@@ -528,7 +628,7 @@ function App() {
         }),
       };
 
-      setReport({ overview, moat, iv, verdict, news });
+      setReport({ overview, moat, iv, verdict, news, history, cacheInfo });
     } catch (e) {
       const msg = e.name === "AbortError"
         ? "Request timed out. Please check your connection and try again."
@@ -618,7 +718,7 @@ function App() {
 
       {/* Report */}
       {report && !loading && (() => {
-        const { overview, moat, iv, verdict, news } = report;
+        const { overview, moat, iv, verdict, news, history, cacheInfo } = report;
         return (
           <div className="report">
 
@@ -634,9 +734,20 @@ function App() {
                   </div>
                 )}
               </div>
-              {verdict?.verdict && (
-                <div className={`verdict-badge ${verdictClass}`}>{verdict.verdict}</div>
-              )}
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 8 }}>
+                {verdict?.verdict && (
+                  <div className={`verdict-badge ${verdictClass}`}>{verdict.verdict}</div>
+                )}
+                {cacheInfo && (
+                  <div style={{ fontFamily: "'Courier Prime', monospace", fontSize: 11,
+                                letterSpacing: 1, color: FADED, display: "flex",
+                                alignItems: "center", gap: 5 }}
+                       title={cacheInfo.hint}>
+                    <span>{cacheInfo.icon}</span>
+                    <span>{cacheInfo.label}</span>
+                  </div>
+                )}
+              </div>
             </div>
 
             <div className="sections">
@@ -740,6 +851,13 @@ function App() {
                       </div>
                     ))}
                   </div>
+                </CollapsibleSection>
+              )}
+
+              {/* 5-Year Financial History */}
+              {history && (
+                <CollapsibleSection title="5-Year Financial History" icon="📈">
+                  <HistoryTable history={history} />
                 </CollapsibleSection>
               )}
 

@@ -1,0 +1,14 @@
+# Dependencies
+node_modules/
+
+# FMP cached data
+cache/
+
+# API keys and secrets
+js/keys.js
+.env
+.env.*
+
+# OS files
+.DS_Store
+Thumbs.db

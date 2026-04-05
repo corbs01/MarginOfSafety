@@ -511,6 +511,80 @@ body {
   font-style: italic;
 }
 
+/* ── 5-Year Financial History Table ── */
+.history-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.history-th {
+  font-family: 'Courier Prime', monospace;
+  font-size: 10px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: #7a6e5f;
+  padding: 9px 12px;
+  text-align: right;
+  border-bottom: 2px solid #c8b99a;
+  white-space: nowrap;
+  background: #faf7f0;
+}
+.history-th-label {
+  text-align: left;
+  min-width: 148px;
+  position: sticky;
+  left: 0;
+  background: #faf7f0;
+  z-index: 1;
+}
+.history-th-year  { min-width: 88px; }
+.history-th-trend { min-width: 72px; text-align: center; }
+.history-th-latest { color: #b8860b; }
+.history-row-even { background: #faf7f0; }
+.history-row-odd  { background: #f5f0e8; }
+.history-section-row td {
+  padding: 10px 12px 4px;
+  background: #f5f0e8;
+  border-bottom: 1px solid #c8b99a;
+}
+.history-section-label {
+  font-family: 'Courier Prime', monospace;
+  font-size: 10px;
+  letter-spacing: 2.5px;
+  text-transform: uppercase;
+  color: #b8860b;
+}
+.history-td {
+  padding: 8px 12px;
+  font-family: 'Courier Prime', monospace;
+  font-size: 13px;
+  text-align: right;
+  border-bottom: 1px solid #e8e0d0;
+  color: #1a1008;
+  white-space: nowrap;
+}
+.history-td-label {
+  font-family: 'EB Garamond', serif;
+  font-size: 15px;
+  font-style: italic;
+  text-align: left;
+  color: #1a1008;
+  position: sticky;
+  left: 0;
+  background: inherit;
+  z-index: 1;
+}
+.history-td-latest {
+  font-weight: 700;
+  color: #b8860b;
+}
+.history-td-trend {
+  font-size: 12px;
+  font-weight: 700;
+  text-align: center;
+  white-space: nowrap;
+}
+
 /* ── Error Box ── */
 .error-box {
   border: 2px solid #8b3a0f;

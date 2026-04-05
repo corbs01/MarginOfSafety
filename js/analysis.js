@@ -174,9 +174,16 @@ function buildIV(profile, m, income5, cf5, params) {
   var inc0 = (inc5 && inc5[0]) || {};
   var cf0  = (cf5  && cf5[0])  || {};
   var netIncome = inc0.netIncome != null ? inc0.netIncome : null;
+  // D&A: prefer cashflow statement; fall back to income statement (FMP includes it there too)
   var da        = cf0.depreciationAndAmortization != null ? cf0.depreciationAndAmortization
-                : cf0.depreciation != null ? cf0.depreciation : null;
-  var capex     = cf0.capitalExpenditure != null ? cf0.capitalExpenditure : null; // negative in FMP
+                : cf0.depreciation                != null ? cf0.depreciation
+                : inc0.depreciationAndAmortization != null ? inc0.depreciationAndAmortization
+                : null;
+  var daSource  = (cf0.depreciationAndAmortization != null || cf0.depreciation != null)
+                  ? "FMP cash flow statement" : "FMP income statement (D&A)";
+  // CapEx: negative in FMP (cash outflow) — cashflow statement only
+  var capex     = cf0.capitalExpenditure  != null ? cf0.capitalExpenditure
+                : cf0.capitalExpenditures != null ? cf0.capitalExpenditures : null;
 
   var oeResult = null;
   var oeSteps  = [];
@@ -187,7 +194,7 @@ function buildIV(profile, m, income5, cf5, params) {
       oeResult = oePerShare * (1 + tg) / (r - tg); // Gordon Growth perpetuity
       oeSteps = [
         { label: "Net Income",             value: formatNum(netIncome), source: "FMP income statement" },
-        { label: "+ D&A",                  value: formatNum(da),        source: "FMP cash flow statement" },
+        { label: "+ D&A",                  value: formatNum(da),        source: daSource },
         { label: "+ Capital Expenditure",  value: formatNum(capex),     source: "FMP cash flow (negative = cash outflow)" },
         { label: "= Owner Earnings",       value: formatNum(ownerEarnings), source: "Net Income + D&A + CapEx" },
         { label: "Owner Earnings / Share", value: "$" + oePerShare.toFixed(2), source: "\u00f7 " + (shares >= 1e9 ? (shares/1e9).toFixed(2)+"B" : (shares/1e6).toFixed(0)+"M") + " shares" },
@@ -199,7 +206,7 @@ function buildIV(profile, m, income5, cf5, params) {
     } else {
       oeSteps = [
         { label: "Net Income",            value: formatNum(netIncome), source: "FMP income statement" },
-        { label: "+ D&A",                 value: formatNum(da),        source: "FMP cash flow statement" },
+        { label: "+ D&A",                 value: formatNum(da),        source: daSource },
         { label: "+ Capital Expenditure", value: formatNum(capex),     source: "FMP cash flow statement" },
         { label: "= Owner Earnings",      value: formatNum(ownerEarnings), source: null },
         { label: "Status",                value: "Negative owner earnings \u2014 not meaningful for valuation", source: null, warn: true },
@@ -208,7 +215,7 @@ function buildIV(profile, m, income5, cf5, params) {
   } else {
     oeSteps = [
       { label: "Net Income",  value: netIncome != null ? formatNum(netIncome) : "N/A", source: "FMP income statement" },
-      { label: "D&A",         value: da    != null ? formatNum(da)    : "N/A", source: "FMP cash flow statement" },
+      { label: "D&A",         value: da    != null ? formatNum(da)    : "N/A", source: daSource },
       { label: "CapEx",       value: capex != null ? formatNum(capex) : "N/A", source: "FMP cash flow statement" },
       { label: "Status",      value: "Insufficient data for owner earnings calculation", source: null, warn: true },
     ];
@@ -254,6 +261,126 @@ function buildIV(profile, m, income5, cf5, params) {
     currentPrice:       fmt2(price),
     marginOfSafety:     mos,
     ivSummary:          ivSummary,
+  };
+}
+
+// ── 5-Year Financial History ──────────────────────────────────────────────────
+//
+//  Returns { years, rows } where:
+//    years : ["2024", "2023", …]  (most-recent first, matching FMP order)
+//    rows  : [{ label, values, raws, trend, trendPct }]
+//
+//  trend    : "up" | "down" | "flat"  (oldest → most-recent direction)
+//  trendPct : e.g. "+42%"
+// ─────────────────────────────────────────────────────────────────────────────
+function buildHistory(incomeArr, balanceArr, cashflowArr) {
+  var inc = incomeArr   || [];
+  var bal = balanceArr  || [];
+  var cf  = cashflowArr || [];
+
+  if (!inc.length && !bal.length && !cf.length) return null;
+
+  // Build year labels from income statement dates (YYYY-MM-DD → "YYYY")
+  var maxLen = Math.max(inc.length, bal.length, cf.length);
+  var years = [];
+  for (var i = 0; i < maxLen; i++) {
+    var src = inc[i] || bal[i] || cf[i];
+    years.push(src && src.date ? src.date.slice(0, 4) : "—");
+  }
+
+  function safeGet(arr, idx, field) {
+    var row = arr[idx];
+    return (row && row[field] != null) ? row[field] : null;
+  }
+
+  function trendDir(raws) {
+    var valid = raws.filter(function (v) { return v != null && isFinite(v); });
+    if (valid.length < 2) return "flat";
+    var first = valid[0];                        // most recent
+    var last  = valid[valid.length - 1];         // oldest
+    if (!last) return "flat";
+    var chg = (first - last) / Math.abs(last);
+    return chg > 0.02 ? "up" : chg < -0.02 ? "down" : "flat";
+  }
+
+  function trendPct(raws) {
+    var valid = raws.filter(function (v) { return v != null && isFinite(v); });
+    if (valid.length < 2) return "";
+    var first = valid[0];
+    var last  = valid[valid.length - 1];
+    if (!last) return "";
+    var chg = (first - last) / Math.abs(last) * 100;
+    return (chg > 0 ? "+" : "") + chg.toFixed(0) + "%";
+  }
+
+  function buildRow(label, raws, formatFn, section) {
+    var values = raws.map(function (v) { return v != null ? formatFn(v) : "—"; });
+    return {
+      label:    label,
+      values:   values,
+      raws:     raws,
+      trend:    trendDir(raws),
+      trendPct: trendPct(raws),
+      section:  section || "",
+    };
+  }
+
+  var idxs = [];
+  for (var j = 0; j < maxLen; j++) idxs.push(j);
+
+  var fmtEps   = function (v) { return "$" + v.toFixed(2); };
+  var fmtRatio2 = function (v) { return Number(v).toFixed(2) + "×"; };
+
+  // ── Income Statement ──────────────────────────────────────────────────────
+  var revenues     = idxs.map(function (i) { return safeGet(inc, i, "revenue"); });
+  var grossPs      = idxs.map(function (i) { return safeGet(inc, i, "grossProfit"); });
+  var grossMargins = idxs.map(function (i) {
+    var r = safeGet(inc, i, "revenue");
+    var g = safeGet(inc, i, "grossProfit");
+    return (r && r > 0 && g != null) ? g / r : null;
+  });
+  var opIncomes    = idxs.map(function (i) { return safeGet(inc, i, "operatingIncome"); });
+  var netIncomes   = idxs.map(function (i) { return safeGet(inc, i, "netIncome"); });
+  var epsArr       = idxs.map(function (i) { return safeGet(inc, i, "eps"); });
+
+  // ── Cash Flow Statement ───────────────────────────────────────────────────
+  var fcfArr   = idxs.map(function (i) { return safeGet(cf, i, "freeCashFlow"); });
+  var capexArr = idxs.map(function (i) { return safeGet(cf, i, "capitalExpenditure"); });
+  var daArr    = idxs.map(function (i) {
+    var v = safeGet(cf, i, "depreciationAndAmortization");
+    if (v == null) v = safeGet(cf, i, "depreciation");
+    return v;
+  });
+
+  // ── Balance Sheet ─────────────────────────────────────────────────────────
+  var equityArr = idxs.map(function (i) {
+    var v = safeGet(bal, i, "totalStockholdersEquity");
+    if (v == null) v = safeGet(bal, i, "totalEquity");
+    return v;
+  });
+  var debtArr = idxs.map(function (i) { return safeGet(bal, i, "totalDebt"); });
+  var deRatios = idxs.map(function (i) {
+    var e = equityArr[i];
+    var d = debtArr[i];
+    return (e && e > 0 && d != null) ? d / e : null;
+  });
+
+  return {
+    years: years,
+    rows: [
+      buildRow("Revenue",          revenues,     formatNum,  "Income"),
+      buildRow("Gross Profit",     grossPs,      formatNum,  "Income"),
+      buildRow("Gross Margin %",   grossMargins, fmtPct,     "Income"),
+      buildRow("Operating Income", opIncomes,    formatNum,  "Income"),
+      buildRow("Net Income",       netIncomes,   formatNum,  "Income"),
+      buildRow("EPS",              epsArr,       fmtEps,     "Income"),
+      buildRow("Free Cash Flow",   fcfArr,       formatNum,  "Cash Flow"),
+      buildRow("CapEx",            capexArr,     formatNum,  "Cash Flow"),
+      buildRow("D&A",              daArr,        formatNum,  "Cash Flow"),
+      buildRow("Total Equity",     equityArr,    formatNum,  "Balance Sheet"),
+      buildRow("Total Debt",       debtArr,      formatNum,  "Balance Sheet"),
+      buildRow("Debt / Equity",    deRatios,     fmtRatio2,  "Balance Sheet"),
+    ],
   };
 }
 
