@@ -48,6 +48,35 @@
     #api-key-save:hover { background: #d4a017; }
     #api-key-status { color: #7a6e5f; font-size: 12px; }
     #api-key-status.ok { color: #4a7c59; }
+
+    /* ── Tool Navigation ── */
+    #tool-nav {
+      background: #251c0e;
+      border-bottom: 1px solid #3a2e1a;
+      padding: 0 24px;
+      display: flex;
+      align-items: center;
+      gap: 0;
+      overflow-x: auto;
+    }
+    #tool-nav a {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 11px 20px;
+      font-family: 'Courier Prime', monospace;
+      font-size: 12px;
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+      text-decoration: none;
+      color: #7a6e5f;
+      border-bottom: 2px solid transparent;
+      white-space: nowrap;
+      transition: color 0.15s, border-color 0.15s;
+    }
+    #tool-nav a:hover { color: #f5f0e8; border-bottom-color: #b8860b; }
+    #tool-nav a.active { color: #b8860b; border-bottom-color: #b8860b; }
+    #tool-nav .nav-divider { width: 1px; height: 18px; background: #3a2e1a; margin: 0 4px; flex-shrink: 0; }
   </style>
 </head>
 <body>
@@ -63,6 +92,12 @@
     <button id="api-key-save">Save</button>
     <span id="api-key-status"></span>
   </div>
+  <nav id="tool-nav">
+    <a href="index.html" class="active">🏛 Stock Analyst</a>
+    <div class="nav-divider"></div>
+    <a href="reverse-dcf.html">📐 Reverse DCF</a>
+  </nav>
+
   <div id="root"></div>
 
   <script>
@@ -607,7 +642,7 @@
           "anthropic-dangerous-direct-browser-access": "true",
         },
         body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
+          model: "claude-sonnet-4-6",
           max_tokens: 1200,
           system: systemPrompt,
           messages,
