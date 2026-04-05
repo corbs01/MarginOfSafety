@@ -63,56 +63,197 @@ function buildMoat(profile, m) {
   };
 }
 
-// ── Intrinsic Value (Graham Number + FCF Capitalisation) ─────────────────────
-function buildIV(profile, m) {
-  var price = m.price;
-  var eps   = m.epsTTM;
-  var bvps  = m.bookValuePerShareTTM;
-  var fcfY  = m.freeCashFlowYieldTTM;
+// ── Intrinsic Value — Three Methods with Full Workings ────────────────────────
+//
+//  Method 1: Graham Number  √(multiplier × EPS × BVPS)
+//  Method 2: 10-Year DCF    PV of projected FCF/share + terminal value
+//  Method 3: Owner Earnings Buffett's preferred: (Net Income + D&A + CapEx) / (r − tg)
+//
+//  params = {
+//    grahamMultiplier  : number   default 22.5
+//    discountRate      : fraction default 0.10
+//    fcfGrowthRate     : fraction or null (null → auto from 5yr revenue CAGR)
+//    terminalGrowthRate: fraction default 0.03
+//  }
+//
+//  income5 / cf5 are the raw FMP arrays (may be null).
+// ─────────────────────────────────────────────────────────────────────────────
+function buildIV(profile, m, income5, cf5, params) {
+  var price  = m.price;
+  var shares = m.shares;
 
-  var grahamNum = (eps && eps > 0 && bvps && bvps > 0) ? Math.sqrt(22.5 * eps * bvps) : null;
-  var fcfValue  = (fcfY && fcfY > 0 && price) ? (price * fcfY) / 0.10 : null;
+  // ── Resolve params ────────────────────────────────────────────────────────
+  var gMult = (params && params.grahamMultiplier  != null) ? params.grahamMultiplier  : 22.5;
+  var r     = (params && params.discountRate      != null) ? params.discountRate      : 0.10;
+  var tg    = (params && params.terminalGrowthRate != null) ? params.terminalGrowthRate : 0.03;
+  var userG = (params && params.fcfGrowthRate     != null) ? params.fcfGrowthRate     : null;
 
-  var low  = grahamNum ? grahamNum * 0.80 : (fcfValue ? fcfValue * 0.75 : null);
-  var mid  = grahamNum || fcfValue;
-  var high = (grahamNum && fcfValue) ? Math.max(grahamNum, fcfValue) * 1.10 : (mid ? mid * 1.20 : null);
+  var eps  = m.epsTTM;
+  var bvps = m.bookValuePerShareTTM;
+  var fcf  = m.freeCashFlowTTM;
+  var fcfPerShare = (fcf != null && shares && shares > 0) ? fcf / shares : null;
 
-  var fmt2 = function (v) { return v != null ? "$" + v.toFixed(2) : "N/A"; };
+  // ── Auto growth rate from 5-year revenue CAGR ─────────────────────────────
+  var inc5  = income5 || [];
+  var autoG = 0.05;
+  var autoGSource = "default 5% (insufficient history)";
+  if (inc5.length >= 2 && inc5[0] && inc5[inc5.length - 1]) {
+    var rev0 = inc5[inc5.length - 1].revenue;
+    var revN = inc5[0].revenue;
+    if (rev0 && rev0 > 0 && revN && revN > 0) {
+      var rawCagr = Math.pow(revN / rev0, 1 / (inc5.length - 1)) - 1;
+      autoG = Math.min(Math.max(rawCagr, 0), 0.20);
+      autoGSource = inc5.length + "-yr revenue CAGR";
+    }
+  }
+  var g = userG != null ? userG : autoG;
 
-  var mos = "Insufficient data to estimate";
-  if (mid && price) {
-    var pct = ((mid - price) / price * 100).toFixed(0);
-    mos = mid > price
-      ? pct + "% undervalued \u2014 " + (pct > 25 ? "meaningful" : "modest") + " margin of safety"
-      : Math.abs(pct) + "% overvalued \u2014 " + (Math.abs(pct) > 25 ? "limited" : "modest") + " margin of safety";
+  var fmt2 = function (v) { return v != null && isFinite(v) ? "$" + v.toFixed(2) : "N/A"; };
+  var pct1 = function (v) { return (v * 100).toFixed(1) + "%"; };
+
+  // ── Method 1: Graham Number ───────────────────────────────────────────────
+  var grahamResult = null;
+  var grahamSteps  = [];
+  if (eps != null && eps > 0 && bvps != null && bvps > 0) {
+    grahamResult = Math.sqrt(gMult * eps * bvps);
+    grahamSteps = [
+      { label: "EPS (TTM)",           value: "$" + eps.toFixed(2),    source: "FMP income statement" },
+      { label: "Book Value / Share",  value: "$" + bvps.toFixed(2),   source: "FMP balance sheet \u00f7 shares" },
+      { label: "Graham Multiplier",   value: gMult + "\u00d7",        source: "Max P/E \u00d7 P/B (editable)" },
+      { label: "Formula",             value: "\u221a(" + gMult + " \u00d7 " + eps.toFixed(2) + " \u00d7 " + bvps.toFixed(2) + ")", source: null },
+      { label: "Intrinsic Value",     value: fmt2(grahamResult),       source: null, highlight: true },
+    ];
+  } else {
+    grahamSteps = [
+      { label: "EPS (TTM)",          value: eps != null ? "$" + eps.toFixed(2) : "N/A",   source: "FMP income statement" },
+      { label: "Book Value / Share", value: bvps != null ? "$" + bvps.toFixed(2) : "N/A", source: "FMP balance sheet" },
+      { label: "Status",             value: eps == null ? "EPS unavailable from FMP"
+                                          : eps <= 0   ? "EPS is negative \u2014 Graham Number not meaningful for loss-making companies"
+                                          : bvps == null ? "Book value unavailable from FMP"
+                                          : "Book value is negative", source: null, warn: true },
+    ];
   }
 
-  var assumptions = [];
-  if (grahamNum) assumptions.push("Graham Number \u221a(22.5 \u00d7 EPS \u00d7 BVPS) = " + fmt2(grahamNum));
-  if (fcfValue)  assumptions.push("FCF capitalised at 10% required return = " + fmt2(fcfValue));
-  assumptions.push("No credit for speculative future growth");
-  assumptions.push("Conservative 10% discount rate (Buffett\u2019s hurdle)");
+  // ── Method 2: 10-Year DCF ─────────────────────────────────────────────────
+  var dcfResult    = null;
+  var dcfSteps     = [];
+  var dcfYearTable = [];
+  if (fcfPerShare != null && fcfPerShare > 0 && r > tg) {
+    var pvFCFs = 0;
+    for (var yr = 1; yr <= 10; yr++) {
+      var fcfYr = fcfPerShare * Math.pow(1 + g, yr);
+      var pvYr  = fcfYr / Math.pow(1 + r, yr);
+      pvFCFs   += pvYr;
+      dcfYearTable.push({ year: yr, fcf: fcfYr, pv: pvYr, cumPV: pvFCFs });
+    }
+    var fcf10  = fcfPerShare * Math.pow(1 + g, 10);
+    var tv     = fcf10 * (1 + tg) / (r - tg);
+    var pvTV   = tv / Math.pow(1 + r, 10);
+    dcfResult  = pvFCFs + pvTV;
+    dcfSteps = [
+      { label: "FCF / Share (Base Year)",  value: "$" + fcfPerShare.toFixed(2), source: "FMP cash flow \u00f7 shares outstanding" },
+      { label: "Growth Rate (Years 1\u201310)", value: pct1(g), source: userG != null ? "User-set" : "Auto: " + autoGSource },
+      { label: "Discount Rate (r)",         value: pct1(r),  source: "Required rate of return (editable)" },
+      { label: "Terminal Growth Rate (tg)", value: pct1(tg), source: "Perpetuity growth after Year 10 (editable)" },
+      { label: "PV of Years 1\u201310 FCFs",    value: "$" + pvFCFs.toFixed(2), source: null },
+      { label: "Terminal Value at Year 10", value: "$" + tv.toFixed(2), source: "FCF\u2081\u2080 \u00d7 (1+tg) \u00f7 (r\u2212tg)" },
+      { label: "PV of Terminal Value",      value: "$" + pvTV.toFixed(2), source: "\u00f7 (1+" + pct1(r) + ")\u00b9\u2070" },
+      { label: "Intrinsic Value",           value: fmt2(dcfResult), source: null, highlight: true },
+    ];
+  } else {
+    var dcfStatus = fcfPerShare == null ? "Free cash flow data unavailable from FMP"
+                  : fcfPerShare <= 0   ? "Negative FCF \u2014 DCF not meaningful (company is burning cash)"
+                  : "Discount rate must be greater than terminal growth rate";
+    dcfSteps = [
+      { label: "FCF / Share", value: fcfPerShare != null ? "$" + fcfPerShare.toFixed(2) : "N/A", source: "FMP cash flow statement" },
+      { label: "Status",      value: dcfStatus, source: null, warn: true },
+    ];
+  }
 
-  var ivSummary = !mid || !price
-    ? "Insufficient data for a reliable intrinsic value estimate for " + profile.companyName + ". A Graham analyst would insist on at least five years of earnings history first."
-    : (mid - price) / price > 0.25
-    ? profile.companyName + " trades at a meaningful discount to our conservative estimate \u2014 precisely the margin of safety Graham demanded."
-    : (mid - price) / price > 0
+  // ── Method 3: Owner Earnings (Buffett) ────────────────────────────────────
+  var inc0 = (inc5 && inc5[0]) || {};
+  var cf0  = (cf5  && cf5[0])  || {};
+  var netIncome = inc0.netIncome != null ? inc0.netIncome : null;
+  var da        = cf0.depreciationAndAmortization != null ? cf0.depreciationAndAmortization
+                : cf0.depreciation != null ? cf0.depreciation : null;
+  var capex     = cf0.capitalExpenditure != null ? cf0.capitalExpenditure : null; // negative in FMP
+
+  var oeResult = null;
+  var oeSteps  = [];
+  if (netIncome != null && da != null && capex != null && shares && shares > 0 && r > tg) {
+    var ownerEarnings = netIncome + da + capex; // capex is stored as negative by FMP
+    var oePerShare    = ownerEarnings / shares;
+    if (oePerShare > 0) {
+      oeResult = oePerShare * (1 + tg) / (r - tg); // Gordon Growth perpetuity
+      oeSteps = [
+        { label: "Net Income",             value: formatNum(netIncome), source: "FMP income statement" },
+        { label: "+ D&A",                  value: formatNum(da),        source: "FMP cash flow statement" },
+        { label: "+ Capital Expenditure",  value: formatNum(capex),     source: "FMP cash flow (negative = cash outflow)" },
+        { label: "= Owner Earnings",       value: formatNum(ownerEarnings), source: "Net Income + D&A + CapEx" },
+        { label: "Owner Earnings / Share", value: "$" + oePerShare.toFixed(2), source: "\u00f7 " + (shares >= 1e9 ? (shares/1e9).toFixed(2)+"B" : (shares/1e6).toFixed(0)+"M") + " shares" },
+        { label: "Discount Rate (r)",      value: pct1(r),  source: "Editable" },
+        { label: "Terminal Growth Rate",   value: pct1(tg), source: "Editable" },
+        { label: "Formula",                value: "OE/share \u00d7 (1+tg) \u00f7 (r\u2212tg) = " + oePerShare.toFixed(2) + " \u00d7 " + (1+tg).toFixed(3) + " \u00f7 " + pct1(r-tg), source: null },
+        { label: "Intrinsic Value",        value: fmt2(oeResult), source: null, highlight: true },
+      ];
+    } else {
+      oeSteps = [
+        { label: "Net Income",            value: formatNum(netIncome), source: "FMP income statement" },
+        { label: "+ D&A",                 value: formatNum(da),        source: "FMP cash flow statement" },
+        { label: "+ Capital Expenditure", value: formatNum(capex),     source: "FMP cash flow statement" },
+        { label: "= Owner Earnings",      value: formatNum(ownerEarnings), source: null },
+        { label: "Status",                value: "Negative owner earnings \u2014 not meaningful for valuation", source: null, warn: true },
+      ];
+    }
+  } else {
+    oeSteps = [
+      { label: "Net Income",  value: netIncome != null ? formatNum(netIncome) : "N/A", source: "FMP income statement" },
+      { label: "D&A",         value: da    != null ? formatNum(da)    : "N/A", source: "FMP cash flow statement" },
+      { label: "CapEx",       value: capex != null ? formatNum(capex) : "N/A", source: "FMP cash flow statement" },
+      { label: "Status",      value: "Insufficient data for owner earnings calculation", source: null, warn: true },
+    ];
+  }
+
+  // ── Aggregate across valid methods ────────────────────────────────────────
+  var valid = [grahamResult, dcfResult, oeResult].filter(function (v) {
+    return v != null && v > 0 && isFinite(v);
+  });
+  var midVal  = valid.length ? valid.reduce(function (a, b) { return a + b; }, 0) / valid.length : null;
+  var lowVal  = valid.length ? Math.min.apply(null, valid) * 0.90 : null;
+  var highVal = valid.length ? Math.max.apply(null, valid) * 1.10 : null;
+
+  var mos = "Insufficient data to estimate";
+  if (midVal && price) {
+    var mosPct = Math.round((midVal - price) / price * 100);
+    mos = midVal > price
+      ? mosPct + "% undervalued \u2014 " + (mosPct > 25 ? "meaningful" : "modest") + " margin of safety"
+      : Math.abs(mosPct) + "% overvalued \u2014 " + (Math.abs(mosPct) > 25 ? "significant" : "modest") + " premium to fair value";
+  }
+
+  var ivSummary = !midVal || !price
+    ? "Insufficient data for a reliable intrinsic value estimate for " + profile.companyName + ". A Graham analyst would insist on at least five years of positive earnings history first."
+    : (midVal - price) / price > 0.25
+    ? profile.companyName + " trades at a meaningful discount to our blended estimate \u2014 precisely the margin of safety Graham demanded."
+    : (midVal - price) / price > 0
     ? profile.companyName + " appears modestly undervalued. The margin of safety is present but thin \u2014 patience may reward a more compelling entry."
-    : (mid - price) / price > -0.20
+    : (midVal - price) / price > -0.20
     ? profile.companyName + " trades near intrinsic value. A fair return requires the business to perform in line with history, with little buffer for disappointment."
-    : profile.companyName + " trades at a premium to our conservative estimate. The investor is paying for growth that has yet to materialise.";
+    : profile.companyName + " trades at a premium to our blended estimate. The investor is paying for growth that has yet to materialise.";
 
   return {
-    intrinsicValueLow:  fmt2(low),
-    intrinsicValueMid:  fmt2(mid),
-    intrinsicValueHigh: fmt2(high),
+    methods: {
+      graham:        { name: "Graham Number",            value: grahamResult, steps: grahamSteps },
+      dcf:           { name: "10-Year DCF",              value: dcfResult,    steps: dcfSteps, yearTable: dcfYearTable },
+      ownerEarnings: { name: "Owner Earnings (Buffett)", value: oeResult,     steps: oeSteps },
+    },
+    autoGrowthRate:     autoG,
+    autoGrowthSource:   autoGSource,
+    intrinsicValueLow:  fmt2(lowVal),
+    intrinsicValueMid:  fmt2(midVal),
+    intrinsicValueHigh: fmt2(highVal),
     currentPrice:       fmt2(price),
     marginOfSafety:     mos,
-    valuationMethod:    grahamNum && fcfValue ? "Graham Number + FCF Capitalisation (blended)"
-                        : grahamNum ? "Graham Number (EPS \u00d7 Book Value)" : "FCF Capitalisation at 10% hurdle",
-    keyAssumptions: assumptions,
-    ivSummary: ivSummary,
+    ivSummary:          ivSummary,
   };
 }
 
